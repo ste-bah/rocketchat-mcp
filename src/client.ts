@@ -22,8 +22,8 @@ export class RocketChatClient {
   private config: ServerConfig;
   private auth: AuthState = { userId: '', authToken: '', authenticated: false };
 
-  // Caches: name → roomId
-  private channelCache = new Map<string, string>();
+  // Caches: name → {roomId, type}
+  private channelCache = new Map<string, { roomId: string; type: 'c' | 'p' }>();
   private dmRoomCache = new Map<string, string>();
 
   constructor(config: ServerConfig) {
@@ -132,21 +132,58 @@ export class RocketChatClient {
     return res.json() as Promise<T>;
   }
 
-  // ── Channel Resolution (name → roomId) ──
+  // ── Channel Resolution (name → roomId, handles public + private) ──
 
   async resolveChannelId(channelName: string): Promise<string> {
     // Check cache first
     const cached = this.channelCache.get(channelName);
-    if (cached) return cached;
+    if (cached) return cached.roomId;
 
-    // Try channels.info by name
-    const data = await this.apiCallWithReauth<{ channel: RocketChatChannel }>(() =>
-      this.apiGet(`/api/v1/channels.info?roomName=${encodeURIComponent(channelName)}`)
-    );
+    // Try public channel first (channels.info)
+    try {
+      const data = await this.apiCallWithReauth<{ channel: RocketChatChannel }>(() =>
+        this.apiGet(`/api/v1/channels.info?roomName=${encodeURIComponent(channelName)}`)
+      );
+      const roomId = data.channel._id;
+      this.channelCache.set(channelName, { roomId, type: 'c' });
+      return roomId;
+    } catch {
+      // Not a public channel, try private group
+    }
 
-    const roomId = data.channel._id;
-    this.channelCache.set(channelName, roomId);
-    return roomId;
+    // Try private group (groups.info)
+    try {
+      const data = await this.apiCallWithReauth<{ group: RocketChatChannel }>(() =>
+        this.apiGet(`/api/v1/groups.info?roomName=${encodeURIComponent(channelName)}`)
+      );
+      const roomId = data.group._id;
+      this.channelCache.set(channelName, { roomId, type: 'p' });
+      return roomId;
+    } catch {
+      // Not found as private either
+    }
+
+    // Last resort: search rooms.get for exact name match
+    try {
+      const data = await this.apiCallWithReauth<{ update: Array<{ _id: string; name: string; t: string }> }>(() =>
+        this.apiGet('/api/v1/rooms.get')
+      );
+      const room = (data.update || []).find(r => r.name === channelName);
+      if (room) {
+        const type = room.t === 'p' ? 'p' as const : 'c' as const;
+        this.channelCache.set(channelName, { roomId: room._id, type });
+        return room._id;
+      }
+    } catch {
+      // rooms.get failed
+    }
+
+    throw new Error(`Channel "${channelName}" not found (tried public, private, and rooms.get)`);
+  }
+
+  // Get the room type for a cached channel
+  private getRoomType(channelName: string): 'c' | 'p' {
+    return this.channelCache.get(channelName)?.type || 'c';
   }
 
   // ── DM Room Resolution (username → roomId) ──
@@ -178,15 +215,26 @@ export class RocketChatClient {
     return this.formatMessage(data.message);
   }
 
-  async getMessages(roomId: string, count: number = 20): Promise<FormattedMessage[]> {
-    // RocketChat caps at 100 per request
+  async getMessages(roomId: string, count: number = 20, channelName?: string): Promise<FormattedMessage[]> {
     const safeCount = Math.min(Math.max(1, count), 100);
+    const roomType = channelName ? this.getRoomType(channelName) : 'c';
 
-    const data = await this.apiCallWithReauth<{ messages: RocketChatMessage[] }>(() =>
-      this.apiGet(`/api/v1/channels.history?roomId=${roomId}&count=${safeCount}`)
-    );
+    // Use groups.history for private channels, channels.history for public
+    const endpoint = roomType === 'p' ? 'groups.history' : 'channels.history';
 
-    return (data.messages || []).map(m => this.formatMessage(m));
+    try {
+      const data = await this.apiCallWithReauth<{ messages: RocketChatMessage[] }>(() =>
+        this.apiGet(`/api/v1/${endpoint}?roomId=${roomId}&count=${safeCount}`)
+      );
+      return (data.messages || []).map(m => this.formatMessage(m));
+    } catch {
+      // Fallback: try the other endpoint
+      const fallback = roomType === 'p' ? 'channels.history' : 'groups.history';
+      const data = await this.apiCallWithReauth<{ messages: RocketChatMessage[] }>(() =>
+        this.apiGet(`/api/v1/${fallback}?roomId=${roomId}&count=${safeCount}`)
+      );
+      return (data.messages || []).map(m => this.formatMessage(m));
+    }
   }
 
   async getDMMessages(roomId: string, count: number = 20): Promise<FormattedMessage[]> {
@@ -202,26 +250,48 @@ export class RocketChatClient {
   // ── Channels ──
 
   async listChannels(): Promise<FormattedChannel[]> {
-    const data = await this.apiCallWithReauth<{ channels: RocketChatChannel[] }>(() =>
-      this.apiGet('/api/v1/channels.list.joined?count=50')
-    );
+    const allChannels: FormattedChannel[] = [];
 
-    const channels = (data.channels || []).map(ch => this.formatChannel(ch));
+    // Get public joined channels
+    try {
+      const data = await this.apiCallWithReauth<{ channels: RocketChatChannel[] }>(() =>
+        this.apiGet('/api/v1/channels.list.joined?count=50')
+      );
+      for (const ch of data.channels || []) {
+        this.channelCache.set(ch.name, { roomId: ch._id, type: 'c' });
+        allChannels.push(this.formatChannel(ch));
+      }
+    } catch { /* no public channels */ }
 
-    // Update cache
-    for (const ch of data.channels || []) {
-      this.channelCache.set(ch.name, ch._id);
-    }
+    // Get private groups
+    try {
+      const data = await this.apiCallWithReauth<{ groups: RocketChatChannel[] }>(() =>
+        this.apiGet('/api/v1/groups.listAll?count=50')
+      );
+      for (const gr of data.groups || []) {
+        this.channelCache.set(gr.name, { roomId: gr._id, type: 'p' });
+        allChannels.push(this.formatChannel(gr));
+      }
+    } catch { /* no private groups or no permission */ }
 
-    return channels;
+    return allChannels;
   }
 
   async getChannelInfo(channelName: string): Promise<FormattedChannel> {
+    // Resolve the channel first (handles public + private)
+    await this.resolveChannelId(channelName);
+    const cached = this.channelCache.get(channelName);
+
+    if (cached?.type === 'p') {
+      const data = await this.apiCallWithReauth<{ group: RocketChatChannel }>(() =>
+        this.apiGet(`/api/v1/groups.info?roomName=${encodeURIComponent(channelName)}`)
+      );
+      return this.formatChannel(data.group);
+    }
+
     const data = await this.apiCallWithReauth<{ channel: RocketChatChannel }>(() =>
       this.apiGet(`/api/v1/channels.info?roomName=${encodeURIComponent(channelName)}`)
     );
-
-    this.channelCache.set(data.channel.name, data.channel._id);
     return this.formatChannel(data.channel);
   }
 

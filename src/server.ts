@@ -151,7 +151,7 @@ async function handleSendMessage(input: SendMessageInput): Promise<string> {
 
 async function handleReadMessages(input: ReadMessagesInput): Promise<string> {
   const roomId = await client.resolveChannelId(input.channel);
-  const messages = await client.getMessages(roomId, input.limit || 20);
+  const messages = await client.getMessages(roomId, input.limit || 20, input.channel);
   return JSON.stringify({
     channel: input.channel,
     count: messages.length,

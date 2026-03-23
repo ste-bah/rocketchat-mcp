@@ -104,6 +104,14 @@ export class RocketChatClient {
     });
   }
 
+  private async apiPostMultipart(path: string, formData: FormData): Promise<Response> {
+    return fetch(`${this.url}${path}`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: formData,
+    });
+  }
+
   private authHeaders(): Record<string, string> {
     return {
       'X-Auth-Token': this.auth.authToken,
@@ -321,6 +329,125 @@ export class RocketChatClient {
         .filter(m => m.text.toLowerCase().includes(lowerQuery))
         .slice(0, safeCount);
     }
+  }
+
+  // ── File Upload ──
+
+  private static MAX_UPLOAD_BYTES = parseInt(process.env.ROCKETCHAT_MAX_UPLOAD_MB || '25', 10) * 1024 * 1024;
+
+  async uploadFile(
+    roomId: string,
+    filePath: string,
+    description?: string
+  ): Promise<{ success: boolean; fileUrl: string; messageId: string }> {
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // Validate file exists
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    // Check file size BEFORE reading into memory
+    const stat = fs.statSync(filePath);
+    if (stat.size > RocketChatClient.MAX_UPLOAD_BYTES) {
+      const maxMB = RocketChatClient.MAX_UPLOAD_BYTES / (1024 * 1024);
+      throw new Error(`File too large: ${(stat.size / (1024 * 1024)).toFixed(1)} MB (max ${maxMB} MB)`);
+    }
+
+    const fileName = path.basename(filePath);
+
+    // Build a factory that creates fresh FormData each call (FormData is consumed by fetch)
+    const buildFormData = () => {
+      const fileBuffer = fs.readFileSync(filePath);
+      const blob = new Blob([fileBuffer]);
+      const fd = new FormData();
+      fd.append('file', blob, fileName);
+      if (description) {
+        fd.append('msg', description);
+      }
+      return fd;
+    };
+
+    // Upload via multipart POST with reauth (factory rebuilds FormData on retry)
+    const data = await this.apiCallWithReauth<{
+      message: RocketChatMessage & { file?: { _id: string; name: string } };
+    }>(() => this.apiPostMultipart(`/api/v1/rooms.upload/${roomId}`, buildFormData()));
+
+    // Extract file URL from response (may be relative)
+    let fileUrl = '';
+    if (data.message?.file) {
+      fileUrl = `${this.url}/file-upload/${data.message.file._id}/${encodeURIComponent(data.message.file.name)}`;
+    } else if (data.message?.attachments?.length) {
+      const link = (data.message.attachments[0] as any).title_link || '';
+      fileUrl = link.startsWith('/') ? `${this.url}${link}` : link;
+    }
+
+    return {
+      success: true,
+      fileUrl: fileUrl || '(URL not returned by server — file was uploaded but URL could not be extracted)',
+      messageId: data.message?._id || '',
+    };
+  }
+
+  // ── File Download ──
+
+  async downloadFile(
+    fileUrl: string,
+    savePath: string
+  ): Promise<{ success: boolean; savedPath: string; sizeBytes: number }> {
+    const fs = await import('fs');
+    const path = await import('path');
+
+    // SSRF protection: only allow downloads from the configured RocketChat server
+    let normalizedUrl = fileUrl;
+    if (fileUrl.startsWith('/')) {
+      normalizedUrl = `${this.url}${fileUrl}`;
+    }
+    const urlObj = new URL(normalizedUrl);
+    const serverObj = new URL(this.url);
+    if (urlObj.hostname !== serverObj.hostname || urlObj.port !== serverObj.port || urlObj.protocol !== serverObj.protocol) {
+      throw new Error(`Download restricted to RocketChat server (${serverObj.origin}). Received: ${urlObj.origin}`);
+    }
+
+    // Path traversal protection: resolve and verify prefix
+    const resolvedPath = path.resolve(savePath);
+    const cwd = process.cwd();
+    const homeDir = process.env.HOME || '/tmp';
+    const tmpDir = '/tmp';
+    // Allow saving to cwd, home, or /tmp (trailing separator prevents sibling-directory escape)
+    const cwdPrefix = cwd.endsWith('/') ? cwd : cwd + '/';
+    const homePrefix = homeDir.endsWith('/') ? homeDir : homeDir + '/';
+    const tmpPrefix = tmpDir.endsWith('/') ? tmpDir : tmpDir + '/';
+    if (!resolvedPath.startsWith(cwdPrefix) && resolvedPath !== cwd &&
+        !resolvedPath.startsWith(homePrefix) && resolvedPath !== homeDir &&
+        !resolvedPath.startsWith(tmpPrefix) && resolvedPath !== tmpDir) {
+      throw new Error(`Save path must be under working directory, home, or /tmp. Got: ${resolvedPath}`);
+    }
+
+    // Fetch with auth headers
+    const res = await fetch(normalizedUrl, { headers: this.authHeaders() });
+    if (!res.ok) {
+      throw new Error(`Download failed (${res.status}): ${res.statusText}`);
+    }
+
+    // Write to disk
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // Ensure parent directory exists
+    const dir = path.dirname(resolvedPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    fs.writeFileSync(resolvedPath, buffer);
+
+    return {
+      success: true,
+      savedPath: resolvedPath,
+      sizeBytes: buffer.length,
+    };
   }
 
   // ── Formatters ──

@@ -134,6 +134,32 @@ const TOOLS = [
       required: ['channel'],
     },
   },
+  {
+    name: 'upload_file',
+    description: 'Upload a local file to a RocketChat channel or DM. Max 25MB by default (configurable via ROCKETCHAT_MAX_UPLOAD_MB env var).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        channel: { type: 'string', description: 'Channel name to upload to (use this OR username, not both)' },
+        username: { type: 'string', description: 'Username to DM the file to (use this OR channel, not both)' },
+        file_path: { type: 'string', description: 'Absolute or relative path to the local file' },
+        description: { type: 'string', description: 'Optional message text to accompany the file' },
+      },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'download_file',
+    description: 'Download a file attachment from RocketChat to a local path. Only allows downloads from the configured RocketChat server (SSRF protection).',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        file_url: { type: 'string', description: 'File URL from a RocketChat message attachment (absolute or relative)' },
+        save_path: { type: 'string', description: 'Local path to save the file to (must be under cwd, home, or /tmp)' },
+      },
+      required: ['file_url', 'save_path'],
+    },
+  },
 ];
 
 // ── Tool Handlers ──
@@ -222,6 +248,32 @@ async function handleGetChannelInfo(input: GetChannelInfoInput): Promise<string>
   return JSON.stringify(info);
 }
 
+async function handleUploadFile(input: { channel?: string; username?: string; file_path: string; description?: string }): Promise<string> {
+  if (!input.channel && !input.username) {
+    throw new Error('Either channel or username is required');
+  }
+
+  let roomId: string;
+  if (input.username) {
+    roomId = await client.resolveDMRoomId(input.username);
+  } else {
+    roomId = await client.resolveChannelId(input.channel!);
+  }
+
+  const result = await client.uploadFile(roomId, input.file_path, input.description);
+  return JSON.stringify({
+    success: true,
+    target: input.channel || input.username,
+    fileUrl: result.fileUrl,
+    messageId: result.messageId,
+  });
+}
+
+async function handleDownloadFile(input: { file_url: string; save_path: string }): Promise<string> {
+  const result = await client.downloadFile(input.file_url, input.save_path);
+  return JSON.stringify(result);
+}
+
 // ── MCP Server ──
 
 const server = new Server(
@@ -260,6 +312,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'get_channel_info':
         result = await handleGetChannelInfo(args as unknown as GetChannelInfoInput);
+        break;
+      case 'upload_file':
+        result = await handleUploadFile(args as unknown as { channel?: string; username?: string; file_path: string; description?: string });
+        break;
+      case 'download_file':
+        result = await handleDownloadFile(args as unknown as { file_url: string; save_path: string });
         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);

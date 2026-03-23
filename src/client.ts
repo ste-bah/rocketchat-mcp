@@ -114,8 +114,11 @@ export class RocketChatClient {
   private async apiCallWithReauth<T>(fn: () => Promise<Response>): Promise<T> {
     let res = await fn();
 
-    // Re-auth on 401
+    // Re-auth on 401 (only for password auth — PAT tokens can't be refreshed)
     if (res.status === 401) {
+      if (this.config.personalAccessToken) {
+        throw new Error('Personal access token rejected (401). Token may be revoked.');
+      }
       console.error('[rocketchat] Token expired, re-authenticating...');
       await this.login();
       res = await fn();

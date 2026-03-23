@@ -42,11 +42,6 @@ const config = {
   personalAccessTokenId: process.env.ROCKETCHAT_TOKEN_ID || undefined,
 };
 
-if (!config.url) {
-  console.error('[rocketchat-mcp] ROCKETCHAT_URL not set');
-  process.exit(1);
-}
-
 if (!config.user && !config.personalAccessToken) {
   console.error('[rocketchat-mcp] ROCKETCHAT_USER or ROCKETCHAT_TOKEN required');
   process.exit(1);
@@ -274,7 +269,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Don't log credentials or auth tokens in error messages
-    const safeMessage = message.replace(/X-Auth-Token:\s*\S+/gi, 'X-Auth-Token: [REDACTED]');
+    const safeMessage = message
+      .replace(/X-Auth-Token:\s*\S+/gi, 'X-Auth-Token: [REDACTED]')
+      .replace(/X-User-Id:\s*\S+/gi, 'X-User-Id: [REDACTED]')
+      .replace(/authToken[=:"]\s*\S+/gi, 'authToken=[REDACTED]')
+      .replace(/password[=:"]\s*\S+/gi, 'password=[REDACTED]');
     return {
       content: [{ type: 'text', text: JSON.stringify({ error: safeMessage }) }],
       isError: true,
@@ -294,7 +293,11 @@ async function main() {
   try {
     await client.login();
   } catch (error) {
-    console.error(`[rocketchat-mcp] Authentication failed: ${error}`);
+    // Never log the raw error — it may contain credentials or auth tokens
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    const safeMsg = msg.replace(/password[=:]\s*\S+/gi, 'password=[REDACTED]')
+      .replace(/authToken[=:"]\s*\S+/gi, 'authToken=[REDACTED]');
+    console.error(`[rocketchat-mcp] Authentication failed: ${safeMsg}`);
     process.exit(1);
   }
 

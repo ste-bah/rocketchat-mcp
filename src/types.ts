@@ -37,7 +37,29 @@ export interface RocketChatMessage {
   };
   _updatedAt?: string;
   mentions?: Array<{ _id: string; username: string }>;
-  attachments?: Array<{ title?: string; text?: string }>;
+  attachments?: Array<{
+    title?: string;
+    title_link?: string;
+    title_link_download?: boolean;
+    text?: string;
+    description?: string;
+    type?: string;           // 'file' for uploaded files
+    image_url?: string;      // For image attachments
+    image_type?: string;
+    image_size?: number;
+    audio_url?: string;
+    video_url?: string;
+  }>;
+  file?: {
+    _id: string;
+    name: string;
+    type?: string;
+    size?: number;
+  };
+  urls?: Array<{
+    url: string;
+    meta?: { pageTitle?: string; description?: string };
+  }>;
 }
 
 export interface FormattedMessage {
@@ -47,6 +69,20 @@ export interface FormattedMessage {
   timestamp: string;
   username: string;
   displayName: string;
+  attachments?: Array<{
+    title: string;
+    type: string;
+    url: string;
+    size?: number;
+    description?: string;
+  }>;
+  file?: {
+    id: string;
+    name: string;
+    type?: string;
+    size?: number;
+    url: string;
+  };
 }
 
 // ── Channels ──

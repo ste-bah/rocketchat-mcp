@@ -453,7 +453,7 @@ export class RocketChatClient {
   // ── Formatters ──
 
   private formatMessage(msg: RocketChatMessage): FormattedMessage {
-    return {
+    const formatted: FormattedMessage = {
       id: msg._id,
       roomId: msg.rid,
       text: msg.msg,
@@ -461,6 +461,40 @@ export class RocketChatClient {
       username: msg.u?.username || 'unknown',
       displayName: msg.u?.name || msg.u?.username || 'unknown',
     };
+
+    // Include file metadata if present
+    if (msg.file) {
+      formatted.file = {
+        id: msg.file._id,
+        name: msg.file.name,
+        type: msg.file.type,
+        size: msg.file.size,
+        url: `${this.url}/file-upload/${msg.file._id}/${encodeURIComponent(msg.file.name)}`,
+      };
+    }
+
+    // Include attachments if present
+    if (msg.attachments?.length) {
+      formatted.attachments = msg.attachments.map(att => ({
+        title: att.title || att.description || 'Untitled attachment',
+        type: att.type || (att.image_url ? 'image' : att.audio_url ? 'audio' : att.video_url ? 'video' : 'file'),
+        url: att.title_link
+          ? (att.title_link.startsWith('/') ? `${this.url}${att.title_link}` : att.title_link)
+          : att.image_url
+            ? (att.image_url.startsWith('/') ? `${this.url}${att.image_url}` : att.image_url)
+            : '',
+        size: att.image_size,
+        description: att.description || att.text,
+      }));
+    }
+
+    // For attachment-only messages (empty text), add a description
+    if (!formatted.text && (formatted.file || formatted.attachments?.length)) {
+      const fileName = formatted.file?.name || formatted.attachments?.[0]?.title || 'attachment';
+      formatted.text = `[Attachment: ${fileName}]`;
+    }
+
+    return formatted;
   }
 
   private formatChannel(ch: RocketChatChannel): FormattedChannel {

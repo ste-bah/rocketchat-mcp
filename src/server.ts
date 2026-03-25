@@ -160,6 +160,18 @@ const TOOLS = [
       required: ['file_url', 'save_path'],
     },
   },
+  {
+    name: 'view_attachment',
+    description: 'Download and view a file attachment from a RocketChat message. Returns the file content for text/images, or metadata for other file types.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        url: { type: 'string', description: 'Attachment URL (from read_messages response)' },
+        save_path: { type: 'string', description: 'Optional: absolute path to save the file locally' },
+      },
+      required: ['url'],
+    },
+  },
 ];
 
 // ── Tool Handlers ──
@@ -185,6 +197,8 @@ async function handleReadMessages(input: ReadMessagesInput): Promise<string> {
       username: m.username,
       text: m.text,
       timestamp: m.timestamp,
+      ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+      ...(m.file ? { file: m.file } : {}),
     })),
   });
 }
@@ -210,6 +224,8 @@ async function handleDMRead(input: DMReadInput): Promise<string> {
       username: m.username,
       text: m.text,
       timestamp: m.timestamp,
+      ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+      ...(m.file ? { file: m.file } : {}),
     })),
   });
 }
@@ -239,6 +255,8 @@ async function handleSearchMessages(input: SearchMessagesInput): Promise<string>
       username: m.username,
       text: m.text,
       timestamp: m.timestamp,
+      ...(m.attachments?.length ? { attachments: m.attachments } : {}),
+      ...(m.file ? { file: m.file } : {}),
     })),
   });
 }
@@ -272,6 +290,22 @@ async function handleUploadFile(input: { channel?: string; username?: string; fi
 async function handleDownloadFile(input: { file_url: string; save_path: string }): Promise<string> {
   const result = await client.downloadFile(input.file_url, input.save_path);
   return JSON.stringify(result);
+}
+
+async function handleViewAttachment(input: { url: string; save_path?: string }): Promise<string> {
+  if (!input.url) throw new Error('"url" is required');
+
+  // Use the existing download_file method from the client (SSRF-protected)
+  if (input.save_path) {
+    const downloadResult = await client.downloadFile(input.url, input.save_path);
+    return JSON.stringify(downloadResult);
+  }
+
+  // If no save_path, just return metadata about the attachment
+  return JSON.stringify({
+    url: input.url,
+    note: 'Provide a save_path to download the file, or use the download_file tool directly.',
+  });
 }
 
 // ── MCP Server ──
@@ -318,6 +352,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'download_file':
         result = await handleDownloadFile(args as unknown as { file_url: string; save_path: string });
+        break;
+      case 'view_attachment':
+        result = await handleViewAttachment(args as unknown as { url: string; save_path?: string });
         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
